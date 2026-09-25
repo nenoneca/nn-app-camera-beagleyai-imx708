@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * DT Overlay for RPi Camera Module 3 (Sony IMX708) on CSI0 of the BeagleY-AI.
+ *
+ * Adapted from k3-am67a-beagley-ai-csi0-imx219.dtso.  The IMX708 driver
+ * (ported from raspberrypi/linux rpi-6.1.y) wants a 24 MHz clock named
+ * "inclk" and validates link-frequencies against {447,450,453} MHz, 2 lanes.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+&{/chosen} {
+	overlays {
+		k3-am67a-beagley-ai-csi0-imx708.kernel = __TIMESTAMP__;
+	};
+};
+
+&{/} {
+	clk_csi0_imx708_fixed: csi0-imx708-inclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+};
+
+&mcu_gpio0 {
+	status = "okay";
+};
+
+&main_i2c2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&main_i2c2_pins_default>;
+	clock-frequency = <400000>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	imx708_0: sensor@1a {
+		compatible = "sony,imx708";
+		reg = <0x1a>;
+
+		clocks = <&clk_csi0_imx708_fixed>;
+		clock-names = "inclk";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&csi0_gpio_pins_default>;
+
+		reset-gpios = <&mcu_gpio0 15 GPIO_ACTIVE_HIGH>;
+
+		port {
+			csi2_cam0: endpoint {
+				remote-endpoint = <&csi2rx0_in_sensor>;
+				link-frequencies = /bits/ 64 <450000000>;
+				clock-lanes = <0>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};
+
+&cdns_csi2rx0 {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		csi0_port0: port@0 {
+			reg = <0>;
+			status = "okay";
+
+			csi2rx0_in_sensor: endpoint {
+				remote-endpoint = <&csi2_cam0>;
+				bus-type = <4>; /* CSI2 DPHY */
+				clock-lanes = <0>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};
+
+&ti_csi2rx0 {
+	status = "okay";
+};
+
+&dphy0 {
+	status = "okay";
+};

@@ -1,0 +1,57 @@
+From: nn <noreply@anthropic.com>
+Subject: [PATCH] beagley-ai: A/B root slots with boot-count fallback (nn ab-v1)
+
+Adds the slot-selection script the nn whole-system OTA relies on.  The
+default bootcmd becomes "run nn_boot" (CONFIG_BOOTCOMMAND) and altbootcmd
+"run nn_rollback_boot" (CONFIG_BOOTCOUNT_ALTBOOTCMD), both in the nn U-Boot
+config fragment.
+
+---
+--- a/board/beagle/beagley-ai/beagley-ai.env	2026-09-16 02:57:55.914814187 +0800
++++ b/board/beagle/beagley-ai/beagley-ai.env	2026-09-16 02:57:55.930814379 +0800
+@@ -23,3 +23,45 @@
+ rd_spec=-
+ 
+ rproc_fw_binaries= 0 /lib/firmware/j722s-mcu-r5f0_0-fw 2 /lib/firmware/j722s-main-r5f0_0-fw 3 /lib/firmware/j722s-c71_0-fw 4 /lib/firmware/j722s-c71_1-fw
++
++/*
++ * nn layout "ab-v1": two root slots, each carrying its own kernel, device
++ * trees and extlinux.conf under /boot.  p2 = slot a, p3 = slot b.
++ * nn_slot is the known-good slot; nn_slot_try, set by the OTA agent together
++ * with upgrade_available=1, is a trial.  CONFIG_BOOTCOUNT_ENV counts trial
++ * boots; past bootlimit U-Boot runs altbootcmd (CONFIG_BOOTCOUNT_ALTBOOTCMD =
++ * "run nn_rollback_boot" -- env_default.h always emits altbootcmd from that
++ * option, so defining it here too would leave two), which drops the trial
++ * and boots the good slot again, leaving nn_rollback=1 for the agent.
++ * A trial slot that does not even load also falls back, at once.
++ *
++ * nn_conf_addr, not ${scriptaddr}: TI's scriptaddr is 0x80000000, which is
++ * where the SPL loads TF-A on this build (CONFIG_K3_ATF_LOAD_ADDR) and is
++ * firewalled -- sysboot writing extlinux.conf there takes a Synchronous Abort
++ * and the board resets in a loop (image N's first boot, 2026-09-15).
++ * 0x90000000 is clear of the kernel (0x82000000), fdt (0x88000000), ramdisk
++ * (0x88080000) and OP-TEE (0x9e800000).
++ *
++ * On a TRIAL boot nn_boot also starts the RTI watchdog (nn_trial_wdt,
++ * main_rti0) for nn_trial_wdt_ms: a trial system that hangs before systemd
++ * takes the watchdog over is reset, and the reset is counted.
++ */
++nn_slot=a
++upgrade_available=0
++bootcount=0
++nn_conf_addr=0x90000000
++nn_trial_wdt=watchdog@e000000
++nn_trial_wdt_ms=60000
++nn_boot=if test -n "${nn_slot_try}"; then setenv nn_cur ${nn_slot_try};
++	else setenv nn_cur ${nn_slot}; fi;
++	if test "${nn_cur}" = "b"; then setenv nn_part 3; else setenv nn_part 2; fi;
++	if test -n "${nn_slot_try}"; then
++		echo "nn: trial boot, arming ${nn_trial_wdt} for ${nn_trial_wdt_ms} ms";
++		wdt dev ${nn_trial_wdt}; wdt start ${nn_trial_wdt_ms}; fi;
++	echo "nn: booting slot ${nn_cur} (mmc 1:${nn_part})";
++	sysboot mmc 1:${nn_part} any ${nn_conf_addr} /boot/extlinux/extlinux.conf;
++	if test -n "${nn_slot_try}"; then
++		echo "nn: trial slot ${nn_cur} did not load"; run altbootcmd; fi
++nn_rollback_boot=echo "nn: trial slot ${nn_slot_try} failed, back to slot ${nn_slot}";
++	setenv nn_slot_try; setenv upgrade_available 0; setenv bootcount 0;
++	setenv nn_rollback 1; saveenv; run nn_boot

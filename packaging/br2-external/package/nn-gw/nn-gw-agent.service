@@ -1,0 +1,9 @@
+[Unit]
+Description=nn camera-as-gateway agent (one tick)
+After=network-online.target nn-data-init.service
+Requires=nn-data-init.service
+ConditionPathExists=/var/lib/nn/kv/nnprov/done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nn-gw-agent

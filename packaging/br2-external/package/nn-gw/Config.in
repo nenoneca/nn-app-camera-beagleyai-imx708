@@ -1,0 +1,17 @@
+config BR2_PACKAGE_NN_GW
+	bool "nn-gw (camera-hosted Thread gateway: gw_linux + agent)"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_PACKAGE_SYSTEMD        # sd-bus (BLE backend) + the units
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_MBEDTLS            # PSA crypto: identity + hub envelopes
+	help
+	  gw_linux from nn-modules/host/gw_linux, the same daemon the
+	  OrangePi hub runs against its USB NCP, plus a small agent that
+	  reports radio presence to the hub, seeds the gateway identity the
+	  hub delivered with the camera's provisioning, and starts the
+	  daemon when the operator enables the role.  Needs an ESP32-C6
+	  running ncp_esp32c6 on USB; without one the agent just reports
+	  "no NCP" and nothing else runs.
+
+comment "nn-gw needs systemd and a toolchain w/ threads"
+	depends on !BR2_PACKAGE_SYSTEMD || !BR2_TOOLCHAIN_HAS_THREADS

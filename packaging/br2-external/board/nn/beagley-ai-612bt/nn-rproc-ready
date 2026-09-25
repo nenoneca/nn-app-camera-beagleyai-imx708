@@ -1,0 +1,79 @@
+#!/bin/sh
+# nn-rproc-ready -- gate the camera stack on the TI RTOS cores ACTUALLY being
+# ready, and self-heal the boot when they are not.
+#
+# "running" is not ready.  remoteproc reports the main R5F and both C7x as
+# `running`/`attached` the moment their firmware is loaded, but TI's vision-apps
+# firmware then synchronises the cores with EACH OTHER before it opens the
+# endpoint TIOVX talks to (rpmsg_chrdev, address 0x15 = 21).
+#
+# WANT=3 is the healthy invariant, not a guess.  Four cores get a virtio bus:
+# the DM R5 -- which Linux only ATTACHES to, it is started by the boot chain --
+# plus the three vision-apps cores (main R5F, C7x_0, C7x_1).  Only those three
+# ever open 0x15; the DM R5 runs different firmware and never does.  So a good
+# boot always shows exactly 3, and WHICH virtio index lacks it moves around
+# between boots, because virtio numbering follows probe order.  (Counting the
+# missing one as a fault is what produced the bogus "2 boots in 10" in an
+# earlier version of this comment; re-counted over 22 boots it is 21 healthy
+# and 1 stalled.)
+#
+# The real stall, 2026-09-17 22:35:03: all four cores came up and all four
+# virtios said "rpmsg host is online", but the three vision-apps cores each
+# announced only `rpmsg_chrdev 0xd` and then nothing further -- no 0x15, no
+# ti.ipc4.ping-pong.  They were HUNG, not slow: the sysfs stop handshake, which
+# the firmware has to answer, timed out on both the C7x and the R5F
+# (`k3_rproc_stop: timedout waiting for rproc completion event`, `-16`).  All
+# three failed together, which is what you would expect if they wedge on the
+# barrier they sync across.  Suspected cause, unproven: stale state in the
+# shared IPC carveout, which a WARM reset does not clear.
+#
+# What happens next is the expensive part.  libtivision_apps waits for that
+# endpoint FOREVER: nn-camera logged "TIDL EP attached" and then nothing for
+# five minutes -- no video, no error, unit "active".  The cores cannot be
+# restarted from sysfs either (see the stop timeout above).  A reboot does
+# clear it, every time it was tried.
+#
+# So: wait for all three endpoints; if they do not appear, reboot -- at most
+# MAX_HEALS times in a row (counter on nn-data, reset by any good boot), so a
+# board whose firmware is genuinely broken stops rebooting and fails loudly
+# instead of looping.  nn-edgeai.service Requires= this unit, so the camera
+# never starts into the hang.
+set -u
+WANT=3
+WAIT_S=${NN_RPROC_WAIT_S:-45}
+MAX_HEALS=2
+CNT=/var/lib/nn-ota/rproc-heal-count
+
+eps() { ls /sys/bus/rpmsg/devices/ 2>/dev/null | grep -c 'rpmsg_chrdev\.-1\.21$'; }
+
+# An image without the RTOS firmware has nothing to wait for.
+[ -f /etc/nn-ti-vision-apps-version ] || { echo "nn-rproc-ready: no RTOS firmware in this image -- nothing to gate"; exit 0; }
+
+i=0
+while [ "$i" -lt "$WAIT_S" ]; do
+    n=$(eps)
+    if [ "$n" -ge "$WANT" ]; then
+        echo "nn-rproc-ready: TIOVX endpoint up on $n cores after ${i}s"
+        rm -f "$CNT"
+        exit 0
+    fi
+    sleep 1; i=$((i + 1))
+done
+
+n=$(eps)
+have=$(ls /sys/bus/rpmsg/devices/ 2>/dev/null | grep 'rpmsg_chrdev' | tr '\n' ' ')
+heals=$(cat "$CNT" 2>/dev/null || echo 0)
+case "$heals" in ''|*[!0-9]*) heals=0 ;; esac
+echo "nn-rproc-ready: only $n of $WANT cores opened the TIOVX endpoint after ${WAIT_S}s (have: ${have:-none})" >&2
+
+if [ "$heals" -lt "$MAX_HEALS" ]; then
+    echo $((heals + 1)) > "$CNT"; sync
+    echo "nn-rproc-ready: RTOS core bring-up stalled -- rebooting to recover (self-heal $((heals + 1))/$MAX_HEALS)" >&2
+    logger -t nn-rproc-ready "RTOS bring-up stalled ($n/$WANT endpoints); self-heal reboot $((heals + 1))/$MAX_HEALS"
+    systemctl --no-block reboot
+    exit 1
+fi
+echo "nn-rproc-ready: still stalled after $MAX_HEALS self-heal reboots -- NOT rebooting again." >&2
+echo "                The camera stack stays down; this needs a power cycle or a firmware fix." >&2
+logger -t nn-rproc-ready "RTOS bring-up stalled after $MAX_HEALS self-heals; giving up (camera stack down)"
+exit 1

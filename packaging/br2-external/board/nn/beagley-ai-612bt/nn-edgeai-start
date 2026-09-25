@@ -1,0 +1,58 @@
+#!/bin/sh
+# nn-edgeai-start -- validate and start the TI edgeai container.
+#
+# Called by nn-edgeai.service.  Does three things, in this order, because each
+# one makes the next meaningful:
+#   1. refuse to run a container whose SDK does not match the image's RTOS
+#      firmware (see nn-edgeai-install for why that mismatch is fatal);
+#   2. refuse to run before the cores the pipeline needs are actually up --
+#      a failed firmware load leaves them "offline", not "crashed", so
+#      everything else looks healthy and only the ISP is missing;
+#   3. generate the runtime config under /run and start the container.
+set -eu
+
+DEST=/opt/nn-app/edgeai
+NAME=edgeai
+LXCPATH=/run/nn-edgeai
+TEMPLATE=/usr/share/nn/edgeai-lxc.conf
+HOST_VER_FILE=/etc/nn-ti-vision-apps-version
+
+die() { printf 'nn-edgeai-start: %s\n' "$*" >&2; exit 1; }
+
+[ -d "$DEST/rootfs" ] || die "no container at $DEST -- run nn-edgeai-install first"
+[ -f "$TEMPLATE" ]    || die "missing $TEMPLATE"
+
+HOST_VER="$(tr -d '[:space:]' < "$HOST_VER_FILE" 2>/dev/null || true)"
+CVER="$(tr -d '[:space:]' < "$DEST/rootfs/etc/nn-ti-vision-apps-version" 2>/dev/null || true)"
+[ -n "$HOST_VER" ] || die "image has no $HOST_VER_FILE"
+[ -n "$CVER" ]     || die "container has no /etc/nn-ti-vision-apps-version"
+[ "$HOST_VER" = "$CVER" ] || die "VERSION MISMATCH: image firmware $HOST_VER vs
+  container $CVER.  Refusing to start: a TIOVX/firmware mismatch wedges the
+  pipeline in a way only a power cycle clears."
+
+# The ISP runs on the main R5F.  Match on the firmware name, not the node
+# name: /sys/class/remoteproc/*/name is the DT node address (7e000000.dsp),
+# which identifies nothing, and the index moves between boots.
+want=j722s-main-r5f0_0-fw
+state=""
+for r in /sys/class/remoteproc/remoteproc*; do
+    [ -f "$r/firmware" ] || continue
+    [ "$(cat "$r/firmware")" = "$want" ] || continue
+    state="$(cat "$r/state" 2>/dev/null || true)"
+    break
+done
+case "$state" in
+    running|attached) ;;
+    "") die "no remoteproc asks for $want -- the vision-apps overlay did not apply" ;;
+    *)  die "$want is '$state', not running -- the ISP would be absent.
+  Check the boot log for 'bad phdr' (the carveouts do not match the firmware)." ;;
+esac
+
+rm -rf "$LXCPATH/$NAME"
+mkdir -p "$LXCPATH/$NAME"
+{
+    printf 'lxc.rootfs.path = dir:%s/rootfs\n' "$DEST"
+    cat "$TEMPLATE"
+} > "$LXCPATH/$NAME/config"
+
+exec lxc-start -n "$NAME" -P "$LXCPATH" -F

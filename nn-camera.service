@@ -1,0 +1,16 @@
+# systemd unit for the BeagleY-AI nn camera.
+# Config lives in /etc/nn-camera.env (NN_HUB_HOST, NN_STREAM_PUB, ...):
+# no credentials or endpoints in source or unit files.
+[Unit]
+Description=nn camera (IMX708 -> WAVE5 -> encrypted uplink)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/nn-camera.env
+ExecStart=/usr/local/bin/nn-camera
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

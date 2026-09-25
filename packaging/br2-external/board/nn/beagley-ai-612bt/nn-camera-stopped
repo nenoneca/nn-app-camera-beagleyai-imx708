@@ -1,0 +1,25 @@
+#!/bin/sh
+# nn-camera-stopped -- ExecStopPost of nn-camera.service: take an UNREGISTERED
+# camera back to BLE setup mode.
+#
+# The hub's unregister sends CLEAR; nn-camera arms a flag, restarts, wipes its
+# KV store at the next start (identity, stream key, hub endpoint) and exits 64
+# "unprovisioned".  On the ESP cameras that same wipe lands in setup mode by
+# itself.  Here nothing did: nn-setupd only looks at boot, so the camera would
+# restart-loop to its StartLimit and sit dead and unreachable-by-design, with
+# Wi-Fi still joined and no way to re-provision it short of a serial console.
+#
+# So: if this run STARTED provisioned (flag set by ExecStartPre) and is no
+# longer, forget the Wi-Fi network too -- an unregistered camera keeps no
+# credentials, same as the ESP NVS erase -- and reboot.  nn-setupd then finds
+# it unprovisioned and advertises.  The /run flag is what prevents a loop: it
+# does not survive the reboot, and a never-provisioned camera never sets it
+# (ExecCondition keeps nn-camera from starting at all).
+F=/run/nn-camera.was-provisioned
+[ -f "$F" ] || exit 0
+/usr/sbin/nn-provisioned && exit 0
+rm -f "$F"
+logger -t nn-camera "unregistered: provisioning cleared -- forgetting Wi-Fi and rebooting into BLE setup mode"
+rm -f /var/lib/iwd/*.psk /var/lib/iwd/*.open /var/lib/iwd/*.8021x 2>/dev/null
+sync
+systemctl --no-block reboot

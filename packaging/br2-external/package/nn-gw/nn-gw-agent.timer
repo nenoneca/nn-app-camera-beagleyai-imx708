@@ -1,0 +1,12 @@
+# Once a minute: cheap (two small hub calls), and a minute is the most a
+# plugged-in radio or a webapp toggle should take to have an effect.
+[Unit]
+Description=run nn-gw-agent every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

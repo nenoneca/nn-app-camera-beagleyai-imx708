@@ -1,0 +1,43 @@
+[Unit]
+# Give up instead of grinding.  Each failed start leaks TIOVX object
+# descriptors in the shared memory the C7x firmware uses, and they are only
+# reclaimed by a reboot -- so an unlimited restart loop converts ONE failure
+# into an exhausted descriptor pool ("Exceeded max object descriptors"), after
+# which tiovxisp cannot create a context and EVERY start fails for a second,
+# unrelated reason.  Observed in the field at 1169 restarts, by which point
+# the original trigger was unrecoverable from the logs.
+# Five failures in five minutes and it stays failed, which is visible in
+# systemctl and leaves the DSP usable.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Description=nn camera (IMX708 + VPAC ISP + WAVE5 + C7x edge inference, in edgeai container)
+After=nn-npu.service network-online.target
+Requires=nn-npu.service
+
+[Service]
+Type=simple
+# systemd only sees lxc-attach; the app runs INSIDE the container, in the
+# container's cgroup, so `systemctl stop` does NOT reap it.  It survives,
+# keeps the capture node open, and the next start fails with EBUSY.  Reap
+# it explicitly before start and on stop.
+#
+# SIGINT and WAIT, never SIGKILL first: the app releases its TIDL session on
+# the way out, and killing it hard wedges the C7x so every later start fails
+# with "Create state function failed" until the board is rebooted.
+#
+# pkill -x (exact process NAME), never -f (full command line): an -f pattern
+# like "opt/nn/.*nn-camera" also matches the command line of whoever is
+# running it -- it has killed an operator's own SSH session on this project.
+ExecStartPre=-/usr/bin/lxc-attach -n edgeai -- pkill -INT -x nn-camera
+ExecStartPre=-/bin/sleep 10
+ExecStartPre=-/usr/bin/lxc-attach -n edgeai -- pkill -9 -x nn-camera
+ExecStartPre=/opt/nn-camera/setup-media.sh
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/lxc-attach -n edgeai -- /opt/nn/current/cam_run.sh
+ExecStop=-/usr/bin/lxc-attach -n edgeai -- pkill -INT -x nn-camera
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

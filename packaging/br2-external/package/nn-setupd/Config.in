@@ -1,0 +1,29 @@
+config BR2_PACKAGE_NN_SETUPD
+	bool "nn-setupd (BLE setup mode)"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_PACKAGE_SYSTEMD        # sd-bus, for the BlueZ GATT app
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_MBEDTLS            # PSA crypto for the ECIES envelope
+	select BR2_PACKAGE_BLUEZ5_UTILS       # bluetoothd must own the controller
+	select BR2_PACKAGE_IWD                # where the Wi-Fi credentials land
+	help
+	  Presents the same BLE GATT contract as the ESP cameras
+	  (service e7f00001) so the hub's existing provisioning wizard
+	  adopts this board with no protocol change, then applies the
+	  Wi-Fi credentials through iwd.
+
+	  Runs only while unprovisioned; it exits as soon as the device
+	  has been adopted.
+
+comment "nn-setupd needs systemd (sd-bus) and a toolchain w/ threads"
+	depends on !BR2_PACKAGE_SYSTEMD || !BR2_TOOLCHAIN_HAS_THREADS
+
+config BR2_PACKAGE_NN_SETUPD_SRCDIR
+	string "path to the nn-app-camera-beagleyai-imx708 checkout"
+	default "/media/chalos/mx500/beagley-image-build/src/nn-app-byai"
+	depends on BR2_PACKAGE_NN_SETUPD
+	help
+	  Built from a local checkout rather than fetched, so an image can
+	  be cut from work in progress.  Point this at a clone of
+	  chalos/nn-app-camera-beagleyai-imx708 with its nn-modules
+	  submodule initialised.

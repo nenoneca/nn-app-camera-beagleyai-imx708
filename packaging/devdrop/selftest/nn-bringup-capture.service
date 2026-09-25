@@ -1,0 +1,39 @@
+[Unit]
+Description=Unattended nn bring-up capture (runs once, in the background)
+# Deliberately NOT "After=multi-user.target": combined with WantedBy= that
+# is an ordering cycle, which systemd breaks arbitrarily -- so the ordering
+# you wrote may simply not apply.  Order after the specific things we need.
+After=bluetooth.service systemd-user-sessions.service
+Wants=bluetooth.service
+
+[Service]
+# MUST NOT be Type=oneshot.  A oneshot pulled in by multi-user.target holds
+# the target -- and therefore getty.target, and therefore the console --
+# until the script exits.  That cost a boot: the board came up with a tty
+# that echoed but never printed a login prompt.  # NEVER journal+console here.  Opening /dev/console blocks forever on a
+# 3-wire serial probe (no DCD, non-CLOCAL open waits for carrier), and the
+# unit then forks without ever exec'ing.  Live progress goes to /dev/kmsg
+# from inside the script instead.
+Type=simple is considered
+# started as soon as it forks, so boot completes and the getty appears
+# while the capture runs behind it.
+# NEVER journal+console here.  Opening /dev/console blocks forever on a
+# 3-wire serial probe (no DCD, non-CLOCAL open waits for carrier), and the
+# unit then forks without ever exec'ing.  Live progress goes to /dev/kmsg
+# from inside the script instead.
+Type=simple
+ExecStart=/usr/sbin/nn-bringup-capture.sh
+# RuntimeMaxSec, NOT TimeoutStartSec: for # NEVER journal+console here.  Opening /dev/console blocks forever on a
+# 3-wire serial probe (no DCD, non-CLOCAL open waits for carrier), and the
+# unit then forks without ever exec'ing.  Live progress goes to /dev/kmsg
+# from inside the script instead.
+Type=simple the start phase ends
+# at fork, so TimeoutStartSec bounds nothing at all and reads as protection
+# that is not there.  RuntimeMaxSec is what caps total runtime.
+RuntimeMaxSec=600
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

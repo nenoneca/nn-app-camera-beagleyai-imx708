@@ -1,0 +1,5 @@
+#!/bin/sh
+# nn-provisioned -- exit 0 iff this camera is provisioned.
+# The marker is nnprov/done with first byte 1 (what nn_prov writes on success),
+# the same test the BLE-off drop-in and nn-netwatch use -- one definition.
+[ "$(od -An -tu1 -N1 /var/lib/nn/kv/nnprov/done 2>/dev/null | tr -d ' ')" = 1 ]

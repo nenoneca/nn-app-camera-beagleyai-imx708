@@ -1,0 +1,42 @@
+#!/bin/sh
+# nn-cam-setup -- configure the IMX708 -> CSI capture graph.  Runs on the
+# HOST, before nn-camera starts in the container.
+#
+# Why here and not in cam_run.sh: the graph is a kernel object the host owns
+# (/dev/media0), and the host image ships media-ctl/v4l2-ctl; the trimmed TI
+# container does not, and putting them there would grow it for a job that is
+# not the container's.  The first cut had the container do this and died on
+# "media-ctl: not found" before the camera ever started.
+#
+# Every pad is set explicitly: this SoC propagates NOTHING along the graph,
+# and an unset graph streams zero frames with no error at all.  Nodes are
+# resolved by NAME because v4l2 numbering moves between boots.
+set -u
+SENS_NAME=imx708_wide_noir
+FMT="fmt:SRGGB10_1X10/2304x1296"
+die() { echo "nn-cam-setup: $*" >&2; exit 1; }
+
+CAPTURE=""; SENSDEV=""
+for v in /sys/class/video4linux/*; do
+    n=$(cat "$v/name" 2>/dev/null) || continue
+    case "$n" in
+        "30102000.ticsi2rx context 0") CAPTURE=/dev/${v##*/} ;;
+        "$SENS_NAME")                  SENSDEV=/dev/${v##*/} ;;
+    esac
+done
+[ -n "$CAPTURE" ] || die "no video node named '30102000.ticsi2rx context 0' -- CSI bridge down?"
+[ -n "$SENSDEV" ] || die "no v4l subdev named '$SENS_NAME' -- sensor did not probe?"
+
+for pad in "\"$SENS_NAME\":0" \
+           '"cdns_csi2rx.30101000.csi-bridge":0' \
+           '"cdns_csi2rx.30101000.csi-bridge":1' \
+           '"30102000.ticsi2rx":0' \
+           '"30102000.ticsi2rx":1'; do
+    media-ctl -d /dev/media0 --set-v4l2 "$pad [$FMT]" \
+        || die "could not set $pad"
+done
+v4l2-ctl -d "$CAPTURE" --set-fmt-video=width=2304,height=1296,pixelformat=RG10 >/dev/null \
+    || die "could not set the capture format on $CAPTURE"
+# Startup exposure; the tiovxisp 2A loop takes over from here.
+v4l2-ctl -d "$SENSDEV" --set-ctrl exposure=1600,analogue_gain=400 2>/dev/null || true
+echo "nn-cam-setup: $CAPTURE <- $SENSDEV @ 2304x1296 RG10"

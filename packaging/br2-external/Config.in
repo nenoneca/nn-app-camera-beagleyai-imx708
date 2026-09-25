@@ -1,0 +1,3 @@
+source "$BR2_EXTERNAL_NN_PATH/package/nn-setupd/Config.in"
+source "$BR2_EXTERNAL_NN_PATH/package/nn-sysupd/Config.in"
+source "$BR2_EXTERNAL_NN_PATH/package/nn-gw/Config.in"

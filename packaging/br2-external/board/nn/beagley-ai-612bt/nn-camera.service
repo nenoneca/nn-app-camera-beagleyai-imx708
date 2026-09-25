@@ -1,0 +1,52 @@
+[Unit]
+Description=nn camera (IMX708 + VPAC ISP + WAVE5 + C7x edge inference, in the edgeai container)
+# Installed by nn-app-install; a camera without an app yet skips this silently.
+ConditionPathExists=/opt/nn-app/app/current/cam_run.sh
+After=nn-edgeai.service network-online.target
+Requires=nn-edgeai.service
+# Give up instead of grinding.  Each failed start leaks TIOVX object
+# descriptors in the shared memory the C7x firmware uses, and they are only
+# reclaimed by a reboot -- so an unlimited restart loop converts ONE failure
+# into an exhausted descriptor pool ("Exceeded max object descriptors"), after
+# which tiovxisp cannot create a context and EVERY start fails for a second,
+# unrelated reason.  Observed in the field at 1169 restarts.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# systemd only sees lxc-attach; the app runs INSIDE the container, in the
+# container's cgroup, so `systemctl stop` does NOT reap it.  It survives,
+# keeps the capture node open, and the next start fails with EBUSY.  Reap it
+# explicitly.  SIGINT and WAIT, never SIGKILL first: the app releases its TIDL
+# session on the way out, and killing it hard wedges the C7x until reboot.
+# Exact process NAME via pidof, never a pkill -f pattern: an -f pattern also
+# matches whoever is running it and has killed an operator's own session on
+# this project.  Run the reap on the HOST: the host sees every pid in the
+# container's namespace, and neither the host image nor the container's
+# trimmed busybox has pkill -- the first cut used /usr/bin/pkill and systemd
+# logged "Unable to locate executable" on every start.
+# Unprovisioned -> do not start at all (skipped, not failed).  nn-setupd owns
+# an unprovisioned board; the app would only exit 64 and burn the StartLimit.
+ExecCondition=/usr/sbin/nn-provisioned
+# Remember that THIS run began provisioned: nn-camera-stopped (below) uses it
+# to tell "just unregistered" from "never provisioned", which must not reboot.
+ExecStartPre=/bin/touch /run/nn-camera.was-provisioned
+ExecStartPre=-/bin/sh -c 'for p in $(pidof nn-camera); do kill -INT $p; done'
+ExecStartPre=-/bin/sleep 5
+ExecStartPre=-/bin/sh -c 'for p in $(pidof nn-camera); do kill -9 $p; done'
+# The capture graph, on the host (it owns /dev/media0 and has the tools).
+ExecStartPre=/usr/sbin/nn-cam-setup
+ExecStart=/usr/bin/lxc-attach -n edgeai -P /run/nn-edgeai -- /opt/nn-app/app/current/cam_run.sh
+ExecStop=-/bin/sh -c 'for p in $(pidof nn-camera); do kill -INT $p; done'
+# After a hub unregister (CLEAR) the app wipes its KV and exits 64; this takes
+# the board back to BLE setup mode instead of leaving it dead.
+ExecStopPost=-/usr/sbin/nn-camera-stopped
+# 64 = "unprovisioned": not a crash, do not grind against the StartLimit.
+RestartPreventExitStatus=64
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

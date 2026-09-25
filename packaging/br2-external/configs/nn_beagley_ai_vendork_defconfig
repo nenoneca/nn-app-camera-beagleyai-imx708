@@ -1,0 +1,82 @@
+BR2_aarch64=y
+BR2_ARM_FPU_VFPV4=y
+BR2_SYSTEM_DHCP="eth0"
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="ti/k3-am67a-beagley-ai"
+BR2_LINUX_KERNEL_DTB_KEEP_DIRNAME=y
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_LATEST_LTS_2_12_VERSION=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM="k3"
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_TARGET_BOARD="lite"
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_BL32_OPTEE=y
+BR2_TARGET_OPTEE_OS=y
+BR2_TARGET_OPTEE_OS_PLATFORM="k3-am62x"
+BR2_TARGET_TI_K3_R5_LOADER=y
+BR2_TARGET_TI_K3_R5_LOADER_CUSTOM_VERSION=y
+BR2_TARGET_TI_K3_R5_LOADER_CUSTOM_VERSION_VALUE="2025.07"
+BR2_TARGET_TI_K3_R5_LOADER_BOARD_DEFCONFIG="am67a_beagley_ai_r5"
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION_VALUE="2025.07"
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="am67a_beagley_ai_a53"
+BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
+BR2_TARGET_UBOOT_NEEDS_ATF_BL31=y
+BR2_TARGET_UBOOT_USE_BINMAN=y
+# BR2_TARGET_UBOOT_FORMAT_BIN is not set
+BR2_TARGET_UBOOT_FORMAT_IMG=y
+BR2_TARGET_UBOOT_SPL=y
+BR2_TARGET_UBOOT_SPL_NAME="tispl.bin"
+BR2_TARGET_UBOOT_CUSTOM_MAKEOPTS="TEE=$(BINARIES_DIR)/tee-pager_v2.bin"
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# ---- nn_project: TI vendor kernel 6.1.83-ti-arm64-r72 (+C7x cdev patch) ----
+# The C7x/TIDL NPU, cc33xx radio and our imx708 need the TI vendor tree;
+# mainline has no cc33xx at all.  Source is a LOCAL git mirror at the exact
+# commit the running board was built from.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai/patches"
+# Tarball, NOT git: the local mirror at from-source/work/kernel is a SHALLOW
+# clone (1 reachable commit).  Buildroot fetches it, then cannot traverse
+# parents -- "Failed to traverse parents of commit ac5c6fe..." -> it declares
+# the git cache corrupt and silently falls back to downloading
+# linux-<sha>-git4.tar.gz from sources.buildroot.net, which 404s.  We only
+# need one commit's tree, so `git archive` it and skip git entirely.
+# Regenerate with: board/nn/beagley-ai/mk-kernel-tarball.sh
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="file://$(BR2_EXTERNAL_NN_PATH)/dl/linux-6.1.83-ti-arm64-r72.tar"
+# a locally generated tarball has no upstream hash to check
+# BR2_DOWNLOAD_FORCE_CHECK_HASHES is not set
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai/linux.config"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# kernel 6.1 predates gcc 14's -Wincompatible-pointer-types-as-error
+# Compiler cache.  Only DOWNLOADS are cached between runs otherwise, so the
+# cross toolchain and every package are rebuilt every time -- a warm-cache
+# CI run still took 90 minutes.
+#
+# BR2_CCACHE_DIR is deliberately NOT set here: it defaults to
+# $(HOME)/.buildroot-ccache, and Buildroot lets the ENVIRONMENT variable of
+# the same name override the config (Makefile:205).  So CI points it at a
+# mounted cache without putting a machine-specific path in a file that has
+# to build anywhere -- which is the mistake this tree has already made once.
+BR2_CCACHE=y
+BR2_TOOLCHAIN_BUILDROOT=y
+BR2_GCC_VERSION_13_X=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# Pin headers to 6.1 explicitly.  AS_KERNEL cannot infer a version from a
+# custom GIT kernel, so it falls back to "2.6" -- which silently drops
+# glibc (leaving uclibc) and then lxc.  Must match the vendor kernel.
+BR2_KERNEL_HEADERS_6_1=y
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+# rootfs must hold modules (2715 .ko.xz ≈ 39 MB) + lxc
+BR2_TARGET_ROOTFS_EXT2_SIZE="1G"
+BR2_PACKAGE_LXC=y
+BR2_ROOTFS_POST_IMAGE_SCRIPT="support/scripts/genimage.sh $(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai/post-image-check.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="-c $(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai/genimage.cfg"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai/post-build.sh"

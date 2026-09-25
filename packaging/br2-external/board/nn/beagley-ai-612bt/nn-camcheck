@@ -1,0 +1,146 @@
+#!/bin/sh
+# nn-camcheck -- run ON THE BOARD.  Answers, in order, the questions that
+# actually decide whether the camera stack came up, and stops at the first
+# one that fails, because every later answer is meaningless then.
+#
+# Each of these has a silent failure mode, which is why they are checked
+# explicitly rather than inferred from "the app is running":
+#   1. the overlay may have been skipped by U-Boot (one line, then a normal
+#      boot with no sensor at all);
+#   2. the sensor may not ACK on I2C (wrong pinmux, no power, no camera
+#      plugged in) -- the driver logs and gives up;
+#   3. the CSI graph comes up at UYVY8/640x480 regardless of the sensor, and
+#      nothing propagates the real format: capture then yields ZERO frames
+#      with no error whatsoever;
+#   4. WAVE5 does not probe without its firmware, so the encoder node simply
+#      is not there;
+#   5. the ISP runs on the R5F: if remoteproc did not load it, tiovxisp fails
+#      much later and much less clearly.
+#
+#   nn-camcheck          # checks only
+#   nn-camcheck --grab   # also capture 8 raw frames to /tmp/cam.raw
+set -u
+GRAB=0
+[ "${1:-}" = "--grab" ] && GRAB=1
+
+pass() { printf '  PASS  %s\n' "$*"; }
+fail() { printf '  FAIL  %s\n' "$*"; exit 1; }
+note() { printf '  ....  %s\n' "$*"; }
+
+echo "== camcheck on $(cat /etc/nn-system-version 2>/dev/null || echo '?') =="
+
+# 1. Did the overlays apply?  U-Boot skips a bad overlay and boots anyway.
+#    csi0-imx708 = the sensor; vision-apps = the memory map the RTOS firmware
+#    is linked against (without it the C7x/R5F images fail to load and the ISP
+#    never appears, while everything else looks perfectly healthy).
+for o in k3-am67a-beagley-ai-csi0-imx708 k3-am67a-beagley-ai-vision-apps; do
+    if [ -e "/proc/device-tree/chosen/overlays/$o.kernel" ]; then
+        pass "overlay $o applied ($(tr -d '\0' < "/proc/device-tree/chosen/overlays/$o.kernel"))"
+    else
+        note "overlays present: $(ls /proc/device-tree/chosen/overlays/ 2>/dev/null | tr '\n' ' ')"
+        fail "the $o overlay did NOT apply -- check the U-Boot log for 'Failed to apply overlay'"
+    fi
+done
+
+# 2. Did the sensor probe?  i2c ACK + driver bind.
+if ls /sys/bus/i2c/devices/ 2>/dev/null | grep -q -- '-001a$'; then
+    pass "sensor present on i2c at 0x1a"
+else
+    fail "no i2c device at 0x1a -- camera not plugged in, or i2c2 pins/power wrong"
+fi
+if [ -n "$(find /sys/class/video4linux -name 'v4l-subdev*' 2>/dev/null)" ] \
+   && grep -rqs imx708 /sys/class/video4linux/*/name; then
+    pass "imx708 subdev: $(grep -rls imx708 /sys/class/video4linux/*/name | head -1 | xargs -r dirname | xargs -r basename) ($(grep -rhs imx708 /sys/class/video4linux/*/name | head -1))"
+else
+    note "dmesg: $(dmesg | grep -i imx708 | tail -3)"
+    fail "the imx708 driver did not bind -- module missing, or link-frequency rejected"
+fi
+
+# 3. The capture graph.  Resolve the node by NAME: context 0 of ticsi2rx was
+#    /dev/video3 on r72 and /dev/video2 on 6.12, and a wrong constant gives a
+#    black stream rather than an error.
+command -v media-ctl >/dev/null || fail "media-ctl is missing from the image"
+CAP="$(media-ctl -d /dev/media0 -e '30102000.ticsi2rx context 0' 2>/dev/null)"
+[ -n "$CAP" ] || fail "ticsi2rx context 0 has no video node -- the CSI bridge did not come up"
+pass "capture node $CAP"
+
+# 4. The encoder.  No firmware -> no probe -> no node.
+[ -f /lib/firmware/cnm/wave521c_k3_codec_fw.bin ] || fail "cnm/wave521c_k3_codec_fw.bin is missing"
+ENC=""
+for v in /dev/video*; do
+    n="/sys/class/video4linux/$(basename "$v")/name"
+    [ -f "$n" ] && case "$(cat "$n")" in *[Ww][Aa][Vv][Ee]*|*vpu*|*VPU*) ENC="$v" ;; esac
+done
+if [ -n "$ENC" ]; then pass "H.264 encoder at $ENC ($(cat /sys/class/video4linux/$(basename $ENC)/name))"
+else note "dmesg: $(dmesg | grep -iE 'wave5|vpu' | tail -3)"; fail "no WAVE5 encoder node"; fi
+
+# 5. The remote cores the ISP runs on.  Match on the FIRMWARE name, not the
+#    node name: /sys/class/remoteproc/*/name is the DT node address
+#    (7e000000.dsp, 79000000.r5f), which says nothing about which core it is,
+#    while firmware/ holds the DT's firmware-name -- exactly what we ship.
+#    (Node numbering moves between boots anyway.)
+#    j722s-mcu-r5f0_0-fw is deliberately NOT shipped: it is the MCU-domain R5,
+#    not part of the camera path, so its core staying offline is expected.
+for want in j722s-main-r5f0_0-fw j722s-c71_0-fw j722s-c71_1-fw; do
+    found=0
+    for r in /sys/class/remoteproc/remoteproc*; do
+        [ -f "$r/firmware" ] || continue
+        [ "$(cat "$r/firmware")" = "$want" ] || continue
+        found=1
+        st="$(cat "$r/state" 2>/dev/null)"
+        case "$st" in
+            running|attached) pass "remoteproc $(basename "$r") $want: $st" ;;
+            *) note "remoteproc $(basename "$r") $want is '$st' -- the ISP needs main-r5f0_0 running" ;;
+        esac
+    done
+    [ "$found" = 1 ] || note "no remoteproc node asks for $want"
+done
+[ -f /etc/nn-ti-vision-apps-version ] \
+    && pass "TI vision-apps firmware $(cat /etc/nn-ti-vision-apps-version)" \
+    || note "no /etc/nn-ti-vision-apps-version (pre-1b image)"
+
+# 6. Optional: prove frames actually move.  Set every pad first -- this SoC
+#    propagates nothing, and an unset graph streams zero frames silently.
+if [ "$GRAB" = 1 ]; then
+    command -v v4l2-ctl >/dev/null || fail "v4l2-ctl is missing from the image"
+    SENS="$(grep -rhs imx708 /sys/class/video4linux/*/name | head -1)"
+    FMT="fmt:SRGGB10_1X10/2304x1296"
+    for pad in "\"$SENS\":0" \
+               '"cdns_csi2rx.30101000.csi-bridge":0' \
+               '"cdns_csi2rx.30101000.csi-bridge":1' \
+               '"30102000.ticsi2rx":0' \
+               '"30102000.ticsi2rx":1'; do
+        media-ctl -d /dev/media0 --set-v4l2 "$pad [$FMT]" \
+            || note "could not set $pad"
+    done
+    v4l2-ctl -d "$CAP" --set-fmt-video=width=2304,height=1296,pixelformat=RG10 >/dev/null \
+        || fail "could not set the capture format"
+    rm -f /tmp/cam.raw
+    if v4l2-ctl -d "$CAP" --stream-mmap=4 --stream-count=8 --stream-to=/tmp/cam.raw >/dev/null 2>&1; then
+        # wc -c, NOT stat: this image has no stat(1) (nor timeout(1)), and
+        # `stat -c%s f || echo 0` reports a healthy capture as an empty file.
+        sz=$(wc -c < /tmp/cam.raw 2>/dev/null)
+        want=$((2304 * 1296 * 2 * 8))          # RG10 is 16 bits a pixel
+        if [ "${sz:-0}" -eq "$want" ]; then
+            pass "captured 8 frames, $sz bytes -> /tmp/cam.raw"
+        elif [ "${sz:-0}" -gt 0 ]; then
+            note "captured $sz bytes, expected $want -- short or partial frames"
+        else
+            fail "capture produced an EMPTY file -- the classic zero-frame graph"
+        fi
+        # All-zero pixels mean the DMA ran with the sensor dark or not
+        # streaming: the size is right and every counter looks healthy, so
+        # this is the one case a byte count cannot catch.
+        if [ "${sz:-0}" -gt 0 ]; then
+            if od -An -tx1 -N 4096 /tmp/cam.raw | tr -d ' \n' | grep -qE '[1-9a-f]'; then
+                pass "frame data is non-zero (the sensor is delivering light)"
+            else
+                fail "every pixel in the first 4 KB is zero -- DMA ran but the sensor sent nothing"
+            fi
+        fi
+    else
+        fail "streaming failed -- see dmesg for csi2rx/EPIPE"
+    fi
+fi
+
+echo "== camcheck: OK =="

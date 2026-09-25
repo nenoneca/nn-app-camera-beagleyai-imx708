@@ -1,0 +1,14 @@
+[Unit]
+Description=nn camera HW ISP pipeline (VPAC+WAVE5 in edgeai container)
+# The edgeai container must be up (started once per boot by nn-npu.service).
+After=nn-npu.service
+Requires=nn-npu.service
+
+[Service]
+ExecStartPre=/opt/nn-camera/setup-media.sh
+ExecStart=/usr/bin/lxc-attach -n edgeai -- /opt/nn/isp-pipeline.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

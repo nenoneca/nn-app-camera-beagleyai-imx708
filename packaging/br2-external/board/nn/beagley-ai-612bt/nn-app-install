@@ -1,0 +1,84 @@
+#!/bin/sh
+# nn-app-install -- put the camera app bundle, or a model, onto nn-data.
+#
+#   nn-app-install app   <byai_camera.tar.gz | http-url>
+#   nn-app-install model <model.tar.xz | http-url>   [--use]
+#   nn-app-install --check
+#
+# Layout on nn-data (/opt/nn-app, bound into the edgeai container):
+#   app/releases/<version>/   nn-camera, cam_run.sh, librproc_byname.so
+#   app/current -> releases/<version>
+#   models/<name>/            model/*.onnx + artifacts/ + param.yaml
+#   models/current -> <name>  the one nn-camera loads
+#
+# The model is a separate, user-swappable unit ON PURPOSE.  The TI engine
+# (ORT + TIDL, in the container) stays fixed; `nn-app-install model X --use`
+# switches detectors without a container or a system update.  A model must be
+# WHOLE -- model/*.onnx and artifacts/ -- or it is refused, because a missing
+# half does not fail at install, it fails when the camera starts.
+set -eu
+
+ROOT=/opt/nn-app
+die() { printf 'nn-app-install: %s\n' "$*" >&2; exit 1; }
+say() { printf '==> %s\n' "$*"; }
+
+if [ "${1:-}" = "--check" ]; then
+    printf 'app    : %s\n'   "$(readlink -f "$ROOT/app/current" 2>/dev/null || echo none)"
+    printf 'model  : %s\n'   "$(readlink -f "$ROOT/models/current" 2>/dev/null || echo none)"
+    printf 'models : %s\n'   "$(ls "$ROOT/models" 2>/dev/null | grep -v '^current$' | tr '\n' ' ')"
+    exit 0
+fi
+
+KIND="${1:?usage: nn-app-install app|model <file|url> [--use] | --check}"
+SRC="${2:?source file or url}"
+USE=0; [ "${3:-}" = "--use" ] && USE=1
+
+grep -q " $ROOT " /proc/mounts || die "$ROOT is not a mount point -- nn-data is not mounted"
+
+W="$ROOT/.install-new"; rm -rf "$W"; mkdir -p "$W"
+case "$SRC" in
+    http://*|https://*) say "fetching $SRC"; curl -fsS -o "$W/pkg" "$SRC" || die "download failed";;
+    *) [ -f "$SRC" ] || die "no such file: $SRC"; cp "$SRC" "$W/pkg";;
+esac
+
+# busybox tar has no compression auto-detect: pick the decompressor by the
+# file's magic bytes, compared as hex -- grepping raw bytes for text is how
+# the first version refused a good model tarball as "invalid tar magic".
+mkdir -p "$W/x"
+MAGIC=$(od -An -tx1 -N6 "$W/pkg" | tr -d ' \n')
+case "$MAGIC" in
+    fd377a585a00*) xz -dc "$W/pkg"   | tar -C "$W/x" -xf - || die "unpack failed (xz)" ;;
+    1f8b*)         gzip -dc "$W/pkg" | tar -C "$W/x" -xf - || die "unpack failed (gzip)" ;;
+    *)             tar -C "$W/x" -xf "$W/pkg"              || die "unpack failed (not xz/gzip/tar: magic $MAGIC)" ;;
+esac
+rm -f "$W/pkg"
+
+case "$KIND" in
+app)
+    [ -x "$W/x/nn-camera" ] && [ -f "$W/x/cam_run.sh" ] && [ -f "$W/x/librproc_byname.so" ] \
+        || die "not an nn camera bundle (needs nn-camera, cam_run.sh, librproc_byname.so)"
+    VER=$(sed -n 's/.*"version"[: ]*"\([^"]*\)".*/\1/p' "$W/x/manifest.json" 2>/dev/null | head -1)
+    [ -n "$VER" ] || VER=$(date -u +%Y%m%d%H%M%S)
+    chmod +x "$W/x/nn-camera" "$W/x/cam_run.sh"
+    mkdir -p "$ROOT/app/releases"
+    rm -rf "$ROOT/app/releases/$VER"
+    mv "$W/x" "$ROOT/app/releases/$VER"
+    ln -sfn "releases/$VER" "$ROOT/app/current"
+    say "app $VER -> $ROOT/app/current" ;;
+model)
+    # the tarball may carry the model dir at top level or one dir down
+    D="$W/x"; [ -d "$D/artifacts" ] || D=$(find "$W/x" -maxdepth 2 -type d -name artifacts -exec dirname {} \; | head -1)
+    [ -n "$D" ] && [ -d "$D/artifacts" ] && ls "$D"/model/*.onnx >/dev/null 2>&1 \
+        || die "not a whole model (needs model/*.onnx and artifacts/)"
+    NAME=$(basename "$D"); [ "$NAME" = x ] && NAME=model-$(date -u +%Y%m%d%H%M%S)
+    mkdir -p "$ROOT/models"
+    rm -rf "$ROOT/models/$NAME"
+    mv "$D" "$ROOT/models/$NAME"
+    say "model $NAME installed ($(du -sh "$ROOT/models/$NAME" | cut -f1))"
+    if [ $USE = 1 ] || [ ! -e "$ROOT/models/current" ]; then
+        ln -sfn "$NAME" "$ROOT/models/current"
+        say "models/current -> $NAME (restart nn-camera to use it)"
+    fi ;;
+*)  die "kind must be app or model" ;;
+esac
+rm -rf "$W"; sync

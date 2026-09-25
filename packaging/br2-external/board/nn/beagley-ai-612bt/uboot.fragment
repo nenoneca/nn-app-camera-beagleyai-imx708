@@ -1,0 +1,47 @@
+# nn layout ab-v1 (whole-system A/B OTA).  Symbol names are U-Boot 2026.01's:
+# the older SYS_REDUNDAND_ENVIRONMENT / SYS_MMC_ENV_DEV / SYS_MMC_ENV_PART are
+# gone, and a fragment naming them is silently ignored -- the env would stay
+# "nowhere" with no error.  post-image-check verifies the result in .config.
+
+# Environment on the SD card's user area, as a redundant pair in the gap
+# before the boot FAT (which starts at 4 MiB): 0x100000 and 0x140000, 256 KiB
+# each.  The OTA agent writes it with fw_setenv via /etc/fw_env.config.
+# CONFIG_ENV_IS_NOWHERE is not set
+CONFIG_ENV_IS_IN_MMC=y
+CONFIG_ENV_MMC_DEVICE_INDEX=1
+CONFIG_ENV_MMC_EMMC_HW_PARTITION=0
+CONFIG_ENV_SIZE=0x40000
+CONFIG_ENV_OFFSET=0x100000
+CONFIG_ENV_REDUNDANT=y
+CONFIG_ENV_OFFSET_REDUND=0x140000
+
+# Boot counting in the env: only while upgrade_available=1 (a trial slot),
+# so a normal boot never writes the card.  Past bootlimit, altbootcmd.
+CONFIG_BOOTCOUNT_LIMIT=y
+CONFIG_BOOTCOUNT_ENV=y
+CONFIG_BOOTCOUNT_BOOTLIMIT=3
+# The one and only altbootcmd: env_default.h emits it from this option
+# whenever BOOTCOUNT_LIMIT is on, so the board .env must not define it.
+CONFIG_BOOTCOUNT_ALTBOOTCMD="run nn_rollback_boot"
+
+# Slot selection instead of bootstd's scan (nn_boot is in the board .env).
+# CONFIG_BOOTSTD_BOOTCOMMAND is not set
+CONFIG_USE_BOOTCOMMAND=y
+CONFIG_BOOTCOMMAND="run nn_boot"
+
+# nn_boot loads the slot's /boot/extlinux/extlinux.conf with `sysboot`, and
+# this defconfig leaves the command OFF (bootstd's extlinux bootmeth does not
+# need it).  Image N's first boot stopped at "Unknown command 'sysboot'".
+CONFIG_CMD_SYSBOOT=y
+
+# Design layer 3: arm the RTI hardware watchdog on TRIAL boots only, so a
+# trial system that hangs before anything can reboot it (and before systemd
+# takes the watchdog over) is still reset and counted.  nn_boot starts it
+# with `wdt start` when nn_slot_try is set; AUTOSTART stays off (its default
+# is y) so normal boots are untouched and systemd arms the RTI as before.
+# Linux takes a running RTI over; watchdog.open_timeout=120 on the kernel line
+# stops the kernel petting it on userspace's behalf if nothing opens it.
+CONFIG_WDT=y
+CONFIG_WDT_K3_RTI=y
+CONFIG_CMD_WDT=y
+# CONFIG_WATCHDOG_AUTOSTART is not set

@@ -1,0 +1,22 @@
+[Unit]
+Description=nn BLE setup mode (provisioning via the hub wizard)
+# bluetoothd must own the controller before we register a GATT app, and
+# iwd must exist before we can hand it credentials.
+After=bluetooth.service iwd.service network.target
+Wants=bluetooth.service iwd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/nn-setupd
+# nn-setupd exits 0 immediately when the device is already provisioned, so
+# on an adopted camera this unit runs once and stops.  Restart=on-failure
+# (not always) is what keeps that from becoming a restart loop.
+Restart=on-failure
+RestartSec=5
+# BLE + iwd config both need root; no point pretending otherwise.
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

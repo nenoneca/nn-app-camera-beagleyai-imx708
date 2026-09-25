@@ -1,0 +1,119 @@
+#!/bin/sh
+# nn-gw-agent -- camera-as-gateway agent for the byai camera (one tick).
+#
+# A camera host can also be a Thread gateway: plug an ESP32-C6 running
+# ncp_esp32c6 into its USB and gw_linux drives it.  Every tick this agent
+#   1. tells the hub whether a radio is attached (the operator's toggle in
+#      the webapp is only offered on truthful capability);
+#   2. seeds gw_linux's identity from the dormant one the hub delivered
+#      with this camera's own provisioning (gw_blob, TLV 0x47) -- so the
+#      gateway that dials in IS the "<slot>-gw" the hub already knows, not a
+#      freshly minted stranger with the same label;
+#   3. starts or stops nn-gw to match "radio present AND role enabled";
+#   4. asks the hub to provision the gateway over the network the first
+#      time it is up (gw_linux listens on :8770 until then).
+#
+# Nothing here is a hardcoded address or identity: the hub comes from the
+# provisioning KV (the same place nn-appupd reads it), the slot is resolved
+# from the gateway id, and all of it is skipped until the camera itself is
+# provisioned.  Every hub call is best-effort; whatever fails is retried on
+# the next tick.
+set -u
+
+KV=${NN_KV:-/var/lib/nn/kv/nnprov}
+STATE=${NN_GW_STATE_DIR:-/var/lib/nn-gw}
+API_PORT=${NN_API_PORT:-8769}
+PROV_PORT=${GW_PROV_PORT:-8770}
+GW_LINUX=${GW_LINUX:-/usr/bin/gw_linux}
+
+log() { echo "[nn-gw-agent] $*"; }
+kv_get() { cat "$KV/$1" 2>/dev/null; }
+# first "key": value in a flat JSON doc (the hub emits compact single-line)
+json_get() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" | head -1; }
+
+if ! /usr/sbin/nn-provisioned; then
+    # A wiped camera (unregister) takes its gateway down with it; the
+    # state stays so a re-provision into the same slot resumes as-is.
+    if systemctl is-active -q nn-gw; then
+        log "camera not provisioned -- stopping nn-gw"
+        systemctl stop nn-gw
+    fi
+    exit 0
+fi
+HUB=$(kv_get hub_host)
+[ -n "$HUB" ] || { log "no hub_host in $KV -- idle"; exit 0; }
+API="http://$HUB:$API_PORT/api/v1"
+mkdir -p "$STATE" && chmod 0700 "$STATE"
+
+# ── the dormant identity: which gateway this camera IS ──────────────────
+BLOB="$KV/gw_blob"
+GW_ID=$(json_get gw_id < "$BLOB" 2>/dev/null)
+if [ -z "$GW_ID" ]; then
+    log "no gateway identity in the provisioning blob (hub too old?) -- idle"
+    exit 0
+fi
+# Every tick, not just the first: identity-import is idempotent and prints
+# the id the stored key derives to, so this doubles as the check that the
+# gateway state still belongs to THIS provisioning.  The key goes over
+# stdin, never an argv another process could read.
+seed() { json_get gw_priv_hex < "$BLOB" | NN_GW_STATE_DIR="$STATE" "$GW_LINUX" identity-import - 2>/dev/null; }
+GOT=$(seed); RC=$?
+if [ "$GOT" != "$GW_ID" ] && [ "$RC" = 72 ]; then
+    # A different key is stored: this board was provisioned into another
+    # slot or hub since.  Its old gateway state is meaningless there.
+    log "stored gateway identity is not $GW_ID -- resetting gateway state"
+    systemctl stop nn-gw 2>/dev/null
+    rm -rf "$STATE/kv" "$STATE/slot"
+    GOT=$(seed)
+fi
+if [ "$GOT" != "$GW_ID" ]; then
+    log "identity seed FAILED (derived '${GOT:-nothing}', hub says $GW_ID) -- not starting the gateway"
+    exit 0
+fi
+[ -f "$STATE/slot" ] || log "gateway identity seeded: $GW_ID"
+
+# ── which slot am I?  The camera does not know its own slot name (the
+# media-host registers it); the hub maps a gateway id back to the slot. ──
+CAM=$(cat "$STATE/slot" 2>/dev/null)
+if [ -z "$CAM" ]; then
+    CAM=$(curl -sf -m 10 "$API/gateways/$GW_ID/host" | json_get camera)
+    [ -n "$CAM" ] || { log "hub cannot map gateway $GW_ID to a camera slot -- retry next tick"; exit 0; }
+    echo "$CAM" > "$STATE/slot"
+fi
+CAPI="$API/cameras/$CAM/gateway"
+
+# ── 1. capability report ────────────────────────────────────────────────
+# NCP = an Espressif USB-serial.  The CSI camera is not USB, so on this
+# host any Espressif serial device is the radio.
+NCP=$(ls /dev/serial/by-id/*Espressif* 2>/dev/null | head -1)
+if [ -n "$NCP" ]; then
+    BODY='{"supported": true, "reason": "NCP detected: '"$(basename "$NCP")"'"}'
+else
+    BODY='{"supported": false, "reason": "no NCP detected"}'
+fi
+curl -sf -m 10 -X POST "$CAPI/report" -H 'Content-Type: application/json' \
+     -d "$BODY" >/dev/null || { log "hub unreachable -- retry next tick"; exit 0; }
+
+# ── 2. role wanted?  radio present AND the operator has it enabled ──────
+EN=$(curl -sf -m 10 "$CAPI" | json_get enabled)
+if [ -z "$NCP" ] || [ "$EN" != "true" ]; then
+    if systemctl is-active -q nn-gw; then
+        log "gateway role off (ncp=${NCP:-none}, enabled=${EN:-?}) -- stopping nn-gw"
+        systemctl stop nn-gw
+    fi
+    exit 0
+fi
+systemctl is-active -q nn-gw || { log "starting nn-gw"; systemctl start nn-gw; }
+
+# ── 3. first-time provisioning over the network ─────────────────────────
+# gw-supervise runs provision-net until the six-file blob is complete, then
+# its Restart=always flips it into operate.
+[ -s "$STATE/kv/gw_provision/ot_dataset" ] && exit 0
+sleep 3   # let provision-net open its listener
+MYIP=$(ip -4 route get "$HUB" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+[ -n "$MYIP" ] || { log "no route to the hub -- retry next tick"; exit 0; }
+R=$(curl -sf -m 60 -X POST "$API/gateways/provision-net" -H 'Content-Type: application/json' \
+        -d "{\"addr\": \"$MYIP:$PROV_PORT\", \"name\": \"$CAM-gw\"}")
+log "provision-net: ${R:-failed (will retry next tick)}"
+[ -n "$R" ] && systemctl restart nn-gw
+exit 0

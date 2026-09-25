@@ -1,0 +1,188 @@
+# BeagleY-AI (cam3/cam4) — TI 6.12.57-ti-arm64-r64bt + BLE peripheral.
+# The Factory E2E image: boot -> hci0 -> BLE setup advert -> hub wizard.
+BR2_aarch64=y
+BR2_ARM_FPU_VFPV4=y
+BR2_SYSTEM_DHCP="eth0"
+
+# ---- kernel: TI vendor 6.12 with CONFIG_BT_TI/BT_TI_SDIO ----
+# 6.1 (btti_uart) registers NO hci index on this board; 6.12 + btti_sdio is
+# the build where hci0 came up and LE advertising was confirmed.  6.12 also
+# has remoteproc_cdev natively, so the 6.1 C7x backport patch is NOT applied.
+# Tarball not git: the mirror is a shallow clone (see mk-kernel-tarball.sh).
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="file://$(BR2_EXTERNAL_NN_PATH)/dl/linux-6.12.57-ti-arm64-r64bt.tar"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/linux.config"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="ti/k3-am67a-beagley-ai"
+BR2_LINUX_KERNEL_DTB_KEEP_DIRNAME=y
+# Camera: the CSI-0 IMX708 overlay, built here and applied by U-Boot via the
+# fdtoverlays line in extlinux.conf.  OVERLAY_SUPPORT passes -@ to dtc so the
+# base dtb carries __symbols__ -- without it the overlay cannot resolve any
+# label and U-Boot drops it whole (FDT_ERR_NOTFOUND), booting a cameraless
+# board with no error anyone would notice.  post-image-check.sh applies the
+# overlay with fdtoverlay at build time so that failure cannot ship.
+# The overlay ships in a DIRECTORY, copied as-is over arch/arm64/boot/dts/,
+# and its source sits under ti/ -- not at the dts root, where the obvious
+# CUSTOM_DTS_PATH would put it.  In 6.12 the kernel only defines the %.dtbo
+# rule (scripts/Makefile.dtbs) in directories whose Makefile has a dtb-y list,
+# and the arm64 dts root has none: it is nothing but subdir-y.  A .dtso there
+# fails with a bare "No rule to make target ...dtbo" that says nothing about
+# why.  Under ti/ the rule exists, and DTB_KEEP_DIRNAME then installs the
+# overlay as /boot/ti/<name>.dtbo next to the base dtb.
+BR2_LINUX_KERNEL_DTB_OVERLAY_SUPPORT=y
+BR2_LINUX_KERNEL_CUSTOM_DTS_DIR="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/dts"
+# Layout ab-v1: Image and ti/*.dtb go into the rootfs /boot, so each root
+# slot is a whole system (see post-build.sh step 0 and genimage.cfg).
+BR2_LINUX_KERNEL_INSTALL_TARGET=y
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/patches"
+
+# ---- toolchain: headers must match the kernel or glibc/lxc silently vanish ----
+# Compiler cache.  Only DOWNLOADS are cached between runs otherwise, so the
+# cross toolchain and every package are rebuilt every time -- a warm-cache
+# CI run still took 90 minutes.
+#
+# BR2_CCACHE_DIR is deliberately NOT set here: it defaults to
+# $(HOME)/.buildroot-ccache, and Buildroot lets the ENVIRONMENT variable of
+# the same name override the config (Makefile:205).  So CI points it at a
+# mounted cache without putting a machine-specific path in a file that has
+# to build anywhere -- which is the mistake this tree has already made once.
+BR2_CCACHE=y
+# Build packages in parallel.  Without per-package directories Buildroot
+# builds one package at a time and -jN only parallelises inside it: a clean
+# build ran at a load average of ~3 on 12 cores, a third of it in serial
+# configure scripts.
+BR2_PER_PACKAGE_DIRECTORIES=y
+
+# The cross toolchain is PREBUILT (packaging/build-toolchain.sh, from
+# nn_byai_toolchain_defconfig: gcc 13, glibc, C++, 6.12 headers -- the same
+# toolchain this defconfig used to build internally on every clean build).
+# build-image.sh finds it by key and exports NN_TOOLCHAIN_TARBALL.  Every
+# capability flag below describes that build; Buildroot checks each one
+# against the real toolchain, so a mismatch fails in the first minutes.
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
+BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
+BR2_TOOLCHAIN_EXTERNAL_URL="file://$(NN_TOOLCHAIN_TARBALL)"
+BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="aarch64-buildroot-linux-gnu"
+BR2_TOOLCHAIN_EXTERNAL_GCC_13=y
+BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y
+BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y
+BR2_TOOLCHAIN_EXTERNAL_LOCALE=y
+BR2_TOOLCHAIN_EXTERNAL_HAS_SSP_STRONG=y
+BR2_TOOLCHAIN_EXTERNAL_CXX=y
+# glibc dropped Sun RPC; the internal toolchain never had it either.
+# BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
+
+# ---- boot chain: 2026.01, the version proven on this silicon ----
+BR2_TARGET_ARM_TRUSTED_FIRMWARE=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_LATEST_LTS_2_12_VERSION=y
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM="k3"
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_TARGET_BOARD="lite"
+BR2_TARGET_ARM_TRUSTED_FIRMWARE_BL32_OPTEE=y
+BR2_TARGET_OPTEE_OS=y
+BR2_TARGET_OPTEE_OS_PLATFORM="k3-am62x"
+BR2_TARGET_TI_K3_R5_LOADER=y
+BR2_TARGET_TI_K3_R5_LOADER_CUSTOM_VERSION=y
+BR2_TARGET_TI_K3_R5_LOADER_CUSTOM_VERSION_VALUE="2026.01"
+BR2_TARGET_TI_K3_R5_LOADER_BOARD_DEFCONFIG="am67a_beagley_ai_r5"
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION_VALUE="2026.01"
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="am67a_beagley_ai_a53"
+BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
+BR2_TARGET_UBOOT_NEEDS_ATF_BL31=y
+# U-Boot's host tools (mkeficapsule) include gnutls.  The serial build only
+# worked because host-gnutls happened to be built earlier for something else;
+# with per-package directories U-Boot sees only what it declares.
+BR2_TARGET_UBOOT_NEEDS_GNUTLS=y
+# Layout ab-v1: env on the SD card, boot counting, slot selection
+# (uboot.fragment + patches/uboot/0001-...-slot-boot.patch).  The initial env
+# is what pre-genimage.sh writes onto the card, so fw_setenv never meets a
+# CRC-invalid env and falls back to its generic defaults.
+BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/uboot.fragment"
+BR2_TARGET_UBOOT_INITIAL_ENV=y
+BR2_PACKAGE_HOST_UBOOT_TOOLS=y
+# OP-TEE goes to U-Boot as the RAW pager binary, exactly as upstream
+# Buildroot's beagley_ai_defconfig does.  Do NOT bring back
+# BR2_TARGET_UBOOT_NEEDS_OPTEE_TEE(_ELF): it hands binman tee.elf, and
+# U-Boot 2026.01's optional tee-os entry then packs a signed stub with NO
+# payload -- 1,700 B against 492,556 B in the known-good BeagleBoard
+# tispl.bin.  The build stays green, and the R5 SPL then fails on the board:
+# "Authentication passed" x4, then "ti_sci ... Message not acknowledged /
+# Authentication failed! / Please RESET the board" (E2E run 1, 2026-09-14).
+#
+# Two traps in getting this right:
+#  - uboot.mk appends TEE=$(BINARIES_DIR)/tee.elf AFTER the custom make
+#    options when NEEDS_OPTEE_TEE is set, and on a make command line the last
+#    assignment wins -- so the custom TEE= below would be silently overridden.
+#    NEEDS_OPTEE_TEE must stay off.  Build ordering still holds without it:
+#    U-Boot needs TF-A (NEEDS_ATF_BL31), and TF-A needs OP-TEE (BL32_OPTEE).
+#  - U-Boot 2026.01's binman still wants images/tee.elf to EXIST (that was
+#    the original "[Errno 2] ... images/tee.elf" error), so tee.elf stays in
+#    the OP-TEE core images even though nothing packs it.
+# post-image-check.sh fails the build if the packed tee entry is empty.
+BR2_TARGET_UBOOT_CUSTOM_MAKEOPTS="TEE=$(BINARIES_DIR)/tee-pager_v2.bin"
+BR2_TARGET_OPTEE_OS_CORE_IMAGES="tee.bin tee-*_v2.bin tee.elf"
+BR2_TARGET_UBOOT_USE_BINMAN=y
+# BR2_TARGET_UBOOT_FORMAT_BIN is not set
+BR2_TARGET_UBOOT_FORMAT_IMG=y
+BR2_TARGET_UBOOT_SPL=y
+BR2_TARGET_UBOOT_SPL_NAME="tispl.bin"
+
+# ---- userspace needed to actually reach hci0 and a BLE advert ----
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_EXPERIMENTAL=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+# btmgmt lives in _TOOLS and hciconfig in _DEPRECATED.  Without these the
+# image has bluetoothd but NONE of the commands used to diagnose a radio
+# that does not come up -- which is the whole point of the first cut.
+BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y
+BR2_PACKAGE_BLUEZ5_UTILS_DEPRECATED=y
+BR2_PACKAGE_BLUEZ5_UTILS_MONITOR=y
+BR2_PACKAGE_LXC=y
+BR2_PACKAGE_IWD=y
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_KMOD=y
+BR2_PACKAGE_KMOD_TOOLS=y
+BR2_PACKAGE_LINUX_FIRMWARE=y
+# WAVE5 (cnm) encoder firmware: the H.264 encoder the camera path ends in is
+# useless without it, and the driver fails at probe rather than at STREAMON.
+BR2_PACKAGE_LINUX_FIRMWARE_CNM_WAVE521C_K3_CODEC=y
+# media-ctl + v4l2-ctl: the capture graph on this SoC does NOT propagate the
+# sensor format on its own -- every pad has to be set explicitly or v4l2src
+# streams zero frames with no error at all.  cam_run.sh depends on media-ctl,
+# so it is part of the image, not a debugging extra.
+BR2_PACKAGE_LIBV4L=y
+BR2_PACKAGE_LIBV4L_UTILS=y
+# BLE setup mode — the reason this image exists
+BR2_PACKAGE_NN_SETUPD=y
+BR2_PACKAGE_NN_SETUPD_SRCDIR="$(BR2_EXTERNAL_NN_PATH)/../.."
+# Whole-system OTA agent (layout ab-v1); selects curl, xz, e2fsprogs,
+# uboot-tools fw_printenv/fw_setenv and util-linux blkid/findmnt/sfdisk/ionice.
+BR2_PACKAGE_NN_SYSUPD=y
+BR2_PACKAGE_NN_GW=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+# partx: nn-growdata tells the kernel about the grown p4 without a re-read
+BR2_PACKAGE_UTIL_LINUX_PARTX=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# systemd: bluez + iwd + lxc all expect it, and the ESP-parity setup-mode
+# flow is service-driven.
+BR2_INIT_SYSTEMD=y
+BR2_PACKAGE_SYSTEMD_LOGIND=y
+
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="1500M"
+# operator drops an SSH authorized_keys here; empty in git
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_NN_PATH)/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/pre-genimage.sh support/scripts/genimage.sh $(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/post-image-check.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="-c $(BR2_EXTERNAL_NN_PATH)/board/nn/beagley-ai-612bt/genimage.cfg"

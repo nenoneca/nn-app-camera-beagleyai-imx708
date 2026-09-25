@@ -1,0 +1,97 @@
+#!/bin/sh
+# nn-edgeai-install -- put the trimmed TI edgeai container onto nn-data.
+#
+#   nn-edgeai-install <tarball|http-url>
+#   nn-edgeai-install --check          # just report what is installed
+#
+# The container lives on nn-data (p4), NOT in the root slot: it survives an
+# A/B swap, so swapping the system does not re-push 12 MB and swapping a model
+# does not need a system OTA at all.
+#
+# THE VERSION CHECK IS THE POINT.  The RTOS firmware that runs the ISP ships in
+# the IMAGE (only the host kernel can load remoteproc firmware), while
+# libtivision_apps lives in this container on nn-data.  Because the two live on
+# different partitions with different lifecycles, they CAN drift apart across a
+# system OTA -- and a TIOVX/firmware mismatch does not degrade gracefully: the
+# shared object-descriptor table desynchronises and the pipeline wedges in a
+# way that a reboot does not clear, only a power cycle.  So refuse up front,
+# loudly, rather than discover it as a hung camera in the field.
+set -eu
+
+DEST=/opt/nn-app/edgeai
+HOST_VER_FILE=/etc/nn-ti-vision-apps-version
+
+say()  { printf '==> %s\n' "$*"; }
+die()  { printf 'nn-edgeai-install: %s\n' "$*" >&2; exit 1; }
+
+if [ "${1:-}" = "--check" ]; then
+    if [ -f "$DEST/rootfs/etc/nn-ti-vision-apps-version" ]; then
+        printf 'installed: TI SDK %s at %s\n' \
+            "$(cat "$DEST/rootfs/etc/nn-ti-vision-apps-version")" "$DEST"
+        [ -f "$DEST/.stamp" ] && cat "$DEST/.stamp"
+    else
+        echo "no edgeai container installed at $DEST"; exit 1
+    fi
+    exit 0
+fi
+
+SRC="${1:?usage: nn-edgeai-install <tarball|http-url> | --check}"
+
+[ -f "$HOST_VER_FILE" ] || die "$HOST_VER_FILE is missing -- this image ships no
+  RTOS firmware, so there is nothing for the container to match."
+HOST_VER="$(tr -d '[:space:]' < "$HOST_VER_FILE")"
+
+# nn-data must actually be mounted, or we would fill the root slot instead and
+# lose the whole point of putting it there.
+mountpoint -q /opt/nn-app 2>/dev/null || grep -q ' /opt/nn-app ' /proc/mounts \
+    || die "/opt/nn-app is not a mount point -- nn-data is not mounted"
+
+TMP=/opt/nn-app/.edgeai-new
+rm -rf "$TMP"; mkdir -p "$TMP/rootfs"
+
+case "$SRC" in
+    http://*|https://*)
+        say "fetching $SRC"
+        curl -fsS -o "$TMP/rootfs.tar.xz" "$SRC" || die "download failed: $SRC"
+        TAR="$TMP/rootfs.tar.xz" ;;
+    *)  [ -f "$SRC" ] || die "no such file: $SRC"
+        TAR="$SRC" ;;
+esac
+
+say "unpacking"
+# Decompress explicitly.  This image's tar is busybox tar, which does NOT
+# auto-detect xz -- it hands the compressed bytes straight to the tar parser
+# and says "invalid tar magic", which reads like a corrupt download rather
+# than a missing feature.  (The image ships xz because nn-sysupd needs it.)
+xz -dc "$TAR" > "$TMP/rootfs.tar" || die "xz failed -- truncated download?"
+tar -C "$TMP/rootfs" -xf "$TMP/rootfs.tar" || die "tar failed -- corrupt archive?"
+rm -f "$TMP/rootfs.tar"
+
+CVER_FILE="$TMP/rootfs/etc/nn-ti-vision-apps-version"
+[ -f "$CVER_FILE" ] || { rm -rf "$TMP"; die "the tarball carries no
+  /etc/nn-ti-vision-apps-version -- it is not an nn edgeai container."; }
+CVER="$(tr -d '[:space:]' < "$CVER_FILE")"
+
+if [ "$CVER" != "$HOST_VER" ]; then
+    rm -rf "$TMP"
+    die "VERSION MISMATCH: this image's RTOS firmware is $HOST_VER, the
+  container is $CVER.  These are one matched SDK release; running them
+  together desynchronises the TIOVX object-descriptor table and wedges the
+  pipeline until a power cycle.  Install the container built from $HOST_VER."
+fi
+
+# Swap atomically-ish: the old tree stays until the new one is complete, so an
+# interrupted install leaves the working container in place.
+say "installing TI SDK $CVER -> $DEST"
+{ printf 'version=%s\n' "$CVER"
+  printf 'installed=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'source=%s\n' "$SRC"
+} > "$TMP/.stamp"
+rm -rf "$DEST.old"
+[ -d "$DEST" ] && mv "$DEST" "$DEST.old"
+mkdir -p "$(dirname "$DEST")"
+mv "$TMP" "$DEST"
+rm -rf "$DEST.old"
+sync
+
+say "done: $(cat "$DEST/rootfs/etc/nn-ti-vision-apps-version") at $DEST"

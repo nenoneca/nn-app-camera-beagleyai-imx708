@@ -1,0 +1,125 @@
+#!/bin/sh
+# nn-appupd -- pull the CONTAINER and the APP from the hub, the same way
+# nn-sysupd pulls the system image.
+#
+# Until now these two reached a board from whatever HTTP server the operator
+# happened to be running; that is a bench trick, not a delivery path.  Both
+# live on nn-data and are versioned by the hub exactly like byai_system:
+#
+#   byai_platform -> /opt/nn-app/edgeai   the trimmed TI container (nn-edgeai-install)
+#   byai_camera   -> /opt/nn-app/app      nn-camera + cam_run.sh   (nn-app-install)
+#
+# Deliberately NOT an A/B updater.  A system image is the thing that can brick
+# a board, which is why nn-sysupd has slots, a trial and a health gate; these
+# two are directories on nn-data that the previous version is replaced in
+# place, and the installers already refuse a package that is not whole (and,
+# for the container, one whose SDK does not match the image's RTOS firmware).
+# A failed install leaves what was there; a failed START is nn-camera's
+# StartLimit, not ours.
+#
+# The model is a THIRD thing and is not handled here on purpose: it is the
+# user's to choose (nn-app-install model <url> --use), and silently swapping
+# someone's detector because the hub advertised one would be wrong.
+set -u
+
+KV=${NN_KV:-/var/lib/nn/kv/nnprov}
+STATE=${NN_APPUPD_STATE:-/var/lib/nn-ota/app}
+API_PORT=${NN_API_PORT:-8769}
+FW_PORT=${NN_FW_PORT:-8770}
+CURL_MAX=${NN_CURL_MAX:-600}
+
+log() { echo "[nn-appupd] $*"; }
+kv_get() { cat "$KV/$1" 2>/dev/null; }
+provisioned() { [ "$(od -An -tu1 -N1 "$KV/done" 2>/dev/null | tr -d ' ')" = 1 ]; }
+
+provisioned || { log "not provisioned — idle"; exit 0; }
+HUB=$(kv_get hub_host)
+[ -n "$HUB" ] || { log "no hub_host in $KV — idle"; exit 0; }
+API="http://$HUB:$API_PORT/api/v1"
+FW="http://$HUB:$FW_PORT/gw_firmware"
+mkdir -p "$STATE" 2>/dev/null || true
+
+# first "key": "value" in a flat JSON doc (the hub emits compact single-line)
+json_get() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" | head -1; }
+
+# target_version for a device_type out of /api/v1/firmware
+target_for() {
+    curl -sf -m 15 "$API/firmware" 2>/dev/null \
+        | tr '{' '\n' | grep "\"device_type\"[[:space:]]*:[[:space:]]*\"$1\"" | json_get target_version
+}
+
+# Fetch + verify + install one layer.  The sha256 is the hub's own meta, the
+# same contract nn-sysupd uses; a truncated or tampered download never reaches
+# an installer.
+do_layer() {  # do_layer <device_type> <installer-cmd> <current-version>
+    type="$1"; installer="$2"; cur="$3"
+    want=$(target_for "$type")
+    [ -n "$want" ] || { log "$type: hub advertises no target — skipping"; return 0; }
+    [ "$want" = "$cur" ] && { log "$type: $cur is current"; return 0; }
+    if grep -qxF "$want" "$STATE/blocked-$type" 2>/dev/null; then
+        log "$type: $want is blocked (an earlier install of it failed) — skipping"
+        return 0
+    fi
+    meta=$(curl -sf -m 20 "$FW/$type/$want/meta" 2>/dev/null)
+    sha=$(printf '%s' "$meta" | json_get sha256)
+    size=$(printf '%s' "$meta" | json_get size)
+    [ -n "$sha" ] || { log "$type: no sha256 in the hub's meta for $want — refusing"; return 1; }
+
+    dl="$STATE/dl-$type"
+    rm -f "$dl"
+    log "$type: fetching $want (${size:-?} B)"
+    curl -sf -m "$CURL_MAX" -o "$dl" "$FW/$type/$want" || { log "$type: download failed"; rm -f "$dl"; return 1; }
+    got=$(sha256sum "$dl" | cut -d' ' -f1)
+    if [ "$got" != "$sha" ]; then
+        log "$type: sha256 MISMATCH (hub $sha, got $got) — discarding"
+        rm -f "$dl"; return 1
+    fi
+
+    log "$type: installing $want"
+    if $installer "$dl"; then
+        rm -f "$dl"
+        printf '%s\n' "$want" > "$STATE/version-$type"
+        log "$type: now at $want"
+        return 10          # tell the caller something changed
+    fi
+    # A package the installer REFUSED will be refused again on every tick;
+    # remember it so a bad publish does not become a download loop.
+    printf '%s\n' "$want" >> "$STATE/blocked-$type"
+    rm -f "$dl"
+    log "$type: install of $want FAILED — blocked from retry until a new version is published"
+    return 1
+}
+
+# WHAT IS INSTALLED = what this updater recorded installing, nothing else.
+#
+# The obvious sources are wrong, and both were, silently:
+#   * the container's /etc/nn-ti-vision-apps-version is the TI SDK version
+#     ("11.0.0"), not the artifact version ("11.0.0-trim1");
+#   * the app bundle's manifest carries the git sha it was BUILT at, which is
+#     not the version it was PUBLISHED under.
+# Comparing either against the hub's target never matches, so the updater
+# re-downloaded and reinstalled both layers on EVERY tick and restarted the
+# camera each time -- a 15-minute loop that looks like it is working.  Caught
+# by the "everything current -> nothing to do" case, 2026-09-18.
+#
+# On a board where someone installed by hand there is no record yet, so the
+# first tick installs once and records it; after that it is quiet.
+cur_container=$(cat "$STATE/version-byai_platform" 2>/dev/null | tr -d '[:space:]')
+cur_app=$(cat "$STATE/version-byai_camera" 2>/dev/null | tr -d '[:space:]')
+# ...but only if the layer is actually present: a recorded version with the
+# directory gone (a wiped nn-data) must reinstall, not skip.
+[ -d /opt/nn-app/edgeai/rootfs ]     || cur_container=""
+[ -x /opt/nn-app/app/current/nn-camera ] || cur_app=""
+
+changed=0
+# Container first: the app runs INSIDE it, so a new app that needs a new
+# container must not be installed against the old one.
+do_layer byai_platform /usr/sbin/nn-edgeai-install "$cur_container"; [ $? = 10 ] && changed=1
+do_layer byai_camera   "/usr/sbin/nn-app-install app" "$cur_app";    [ $? = 10 ] && changed=1
+
+if [ "$changed" = 1 ]; then
+    log "restarting the camera stack"
+    systemctl restart nn-edgeai.service 2>/dev/null
+    systemctl restart nn-camera.service 2>/dev/null
+fi
+exit 0

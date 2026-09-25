@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * CSI-0 camera: RPi Camera Module 3 (Sony IMX708) on the BeagleY-AI.
+ *
+ * Built into the image and applied by U-Boot via the `fdtoverlays` line in
+ * extlinux.conf.  The IMX708 driver is the one in-tree in 6.12 -- the old
+ * out-of-tree fork under board/imx708-driver/ is the 6.1 API (probe_new,
+ * v4l2_subdev_get_try_format) and neither compiles nor is needed here.
+ *
+ * WHY THIS DEFINES ITS OWN PIN GROUPS
+ * ----------------------------------
+ * The obvious way to write this is TI's way: reference &main_i2c2_pins_default
+ * and &csi0_gpio_pins_default, which is what TI's own
+ * k3-am67a-beagley-ai-csi0-imx219.dtbo does.  That works against TI's DT
+ * (k3-am67a-beagleyai.dts) but NOT against the BeagleBoard.org DT we build
+ * (k3-am67a-beagley-ai.dts), whose pinmux is HAT-header oriented and defines
+ * neither label.  An overlay naming a symbol the base dtb does not export
+ * does not degrade -- U-Boot rejects the whole overlay with FDT_ERR_NOTFOUND
+ * and the board boots with no camera and no obvious reason why.  That is
+ * exactly how the ov5647 overlay failed on this board before.
+ *
+ * So the pin groups are declared here, with the same pad offsets and mux
+ * values TI's compiled dtb uses, and the overlay depends only on labels that
+ * the SoC .dtsi files provide (main_pmx0, mcu_pmx0, main_i2c2, mcu_gpio0,
+ * cdns_csi2rx0, ti_csi2rx0, dphy0).  post-image-check.sh applies this overlay
+ * to the base dtb with fdtoverlay at build time, so a symbol that goes missing
+ * again fails the build instead of the board.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+/*
+ * Helper to show loaded overlays under /proc/device-tree/chosen/overlays/
+ * -- the same convention the BeagleBoard overlays use, and the cheapest way
+ * to confirm on a running board that the overlay actually applied.
+ */
+&{/chosen} {
+	overlays {
+		k3-am67a-beagley-ai-csi0-imx708.kernel = __TIMESTAMP__;
+	};
+};
+
+&{/} {
+	/*
+	 * The sensor's 24 MHz input clock.  It is a fixed oscillator on the
+	 * camera board, but the driver insists on claiming a clock named
+	 * "inclk" and validating its rate, so model it.
+	 */
+	clk_csi0_imx708_fixed: csi0-imx708-inclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+};
+
+&main_pmx0 {
+	/* Values copied from TI's k3-am67a-beagleyai.dtb, main-i2c2-default-pins.
+	 * 0x60001 = PIN_INPUT_PULLUP | mux mode 1.  I2C needs the pullups: with
+	 * mux alone the bus reads all-ones and the sensor never ACKs. */
+	csi0_i2c2_pins_default: csi0-i2c2-default-pins {
+		pinctrl-single,pins = <
+			0x0b0 0x60001	/* I2C2_SCL */
+			0x0b4 0x60001	/* I2C2_SDA */
+		>;
+	};
+};
+
+&mcu_pmx0 {
+	/* TI's csi0-gpio-default-pins: MCU pad 0x03c (= MCU_GPIO0_15),
+	 * 0x10007 = PIN_OUTPUT | mux mode 7 (GPIO).  This is the camera's
+	 * XCLR/reset line. */
+	csi0_rst_pins_default: csi0-rst-default-pins {
+		pinctrl-single,pins = <
+			0x03c 0x10007	/* MCU_GPIO0_15, camera reset */
+		>;
+	};
+};
+
+&mcu_gpio0 {
+	status = "okay";
+};
+
+&main_i2c2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&csi0_i2c2_pins_default>;
+	clock-frequency = <400000>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	imx708_0: sensor@1a {
+		compatible = "sony,imx708";
+		reg = <0x1a>;
+
+		clocks = <&clk_csi0_imx708_fixed>;
+		clock-names = "inclk";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&csi0_rst_pins_default>;
+
+		reset-gpios = <&mcu_gpio0 15 GPIO_ACTIVE_HIGH>;
+
+		port {
+			csi2_cam0: endpoint {
+				remote-endpoint = <&csi2rx0_in_sensor>;
+				/*
+				 * The driver validates against {447, 450, 453} MHz
+				 * and nothing else; 450 MHz is the rate the Sony
+				 * IOP PLL locks at for 2 lanes (900 Mbps/lane).
+				 */
+				link-frequencies = /bits/ 64 <450000000>;
+				clock-lanes = <0>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};
+
+&cdns_csi2rx0 {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		csi0_port0: port@0 {
+			reg = <0>;
+			status = "okay";
+
+			csi2rx0_in_sensor: endpoint {
+				remote-endpoint = <&csi2_cam0>;
+				bus-type = <4>; /* CSI2 DPHY */
+				clock-lanes = <0>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};
+
+&ti_csi2rx0 {
+	status = "okay";
+};
+
+&dphy0 {
+	status = "okay";
+};

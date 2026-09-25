@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * TI vision-apps memory map for the AM67A (J722S).
+ *
+ * Without this, the RTOS firmware we ship does not load at all:
+ *
+ *   remoteproc remoteproc1: Booting fw image j722s-c71_1-fw, size 11804840
+ *   remoteproc remoteproc1: bad phdr da 0xb1100000 mem 0x8c
+ *   remoteproc remoteproc1: Failed to load program segments: -22
+ *
+ * The kernel's default carveouts come from k3-j722s-ti-ipc-firmware.dtsi and
+ * are sized for TI's small "ti-ipc" demo firmware: 1 MB of DMA plus 15 MB of
+ * code per core.  The vision-apps firmware -- the one that actually drives the
+ * VPAC ISP and the C7x DL accelerators, and the one the camera pipeline needs
+ * -- is built against a much larger map and links its segments at addresses
+ * (0xad100000, 0xb1100000) that simply are not reserved by default.  Nothing
+ * negotiates this: the ELF program headers are absolute, so the load fails and
+ * the core stays offline.
+ *
+ * So replace the map, exactly as TI's own k3-am67a-beagley-ai-edgeai-apps.dtbo
+ * does: disable the nine default regions, declare the vision-apps ones, and
+ * repoint each core at its new pair.  Values are taken from that compiled
+ * overlay (Processor SDK 11.0), which is the same release as the firmware in
+ * /lib/firmware -- they are one matched set.
+ *
+ * The board has 4 GB in two banks (0x80000000 + 2 GB, 0x880000000 + 2 GB), so
+ * the two high-bank regions below are real memory here; this overlay is NOT
+ * valid on a 2 GB variant.
+ *
+ * Every label it touches is verified to exist in our base dtb, and
+ * post-image-check.sh applies the overlay at build time -- an overlay naming a
+ * missing label is silently skipped by U-Boot and the board boots with the
+ * default map and no ISP.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&{/chosen} {
+	overlays {
+		k3-am67a-beagley-ai-vision-apps.kernel = __TIMESTAMP__;
+	};
+};
+
+/*
+ * The ti-ipc defaults.  Reserved memory is parsed from the merged FDT before
+ * anything else runs, and the scan skips nodes whose status is not okay, so
+ * disabling them here really does free the addresses.
+ */
+&mcu_r5fss0_core0_dma_memory_region	{ status = "disabled"; };
+&mcu_r5fss0_core0_memory_region		{ status = "disabled"; };
+&main_r5fss0_core0_dma_memory_region	{ status = "disabled"; };
+&main_r5fss0_core0_memory_region	{ status = "disabled"; };
+&c7x_0_dma_memory_region		{ status = "disabled"; };
+&c7x_0_memory_region			{ status = "disabled"; };
+&c7x_1_dma_memory_region		{ status = "disabled"; };
+&c7x_1_memory_region			{ status = "disabled"; };
+&rtos_ipc_memory_region			{ status = "disabled"; };
+
+&reserved_memory {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	/* MCU R5F: unchanged addresses, but re-declared so the core can be
+	 * pointed at regions that are still enabled. */
+	vision_apps_mcu_r5f_dma_memory: vision-apps-r5f-dma-memory@a1000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xa1000000 0x00 0x100000>;
+		no-map;
+	};
+
+	vision_apps_mcu_r5f_memory: vision-apps-r5f-memory@a1100000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xa1100000 0x00 0xf00000>;
+		no-map;
+	};
+
+	/* Main R5F -- this is the core the VPAC ISP runs on.  31 MB of code,
+	 * against 15 MB in the default map. */
+	vision_apps_main_r5f_dma_memory: vision-apps-r5f-dma-memory@a2000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xa2000000 0x00 0x100000>;
+		no-map;
+	};
+
+	vision_apps_main_r5f_memory: vision-apps-r5f-memory@a2100000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xa2100000 0x00 0x1f00000>;
+		no-map;
+	};
+
+	vision_apps_rtos_ipc_memory: vision-apps-rtos-ipc-memory-region@a5000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xa5000000 0x00 0x2000000>;
+		no-map;
+	};
+
+	vision_apps_dma_memory: vision-apps-dma-memory@a7000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xa7000000 0x00 0x6000000>;
+		no-map;
+	};
+
+	/* C7x_0: 63 MB of code at 0xad100000 -- the address the shipped
+	 * firmware's program headers name. */
+	vision_apps_c71_0_dma_memory: vision-apps-c71-dma-memory@ad000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xad000000 0x00 0x100000>;
+		no-map;
+	};
+
+	vision_apps_c71_0_memory: vision-apps-c71_0-memory@ad100000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xad100000 0x00 0x3f00000>;
+		no-map;
+	};
+
+	/* C7x_1: likewise at 0xb1100000, the address in the log above. */
+	vision_apps_c71_1_dma_memory: vision-apps-c71_1-dma-memory@b1000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xb1000000 0x00 0x100000>;
+		no-map;
+	};
+
+	vision_apps_c71_1_memory: vision-apps-c71_1-memory@b1100000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xb1100000 0x00 0x3f00000>;
+		no-map;
+	};
+
+	vision_apps_core_heap_memory_lo: vision-apps-core-heap-memory-lo@b5000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x00 0xb5000000 0x00 0x2800000>;
+		no-map;
+	};
+
+	/* High bank (the board's second 2 GB): the C7x DDR heaps and the
+	 * buffers TIOVX shares with userspace.  The latter is a dma-heap, not
+	 * a no-map carveout -- the container allocates frame buffers from it. */
+	vision_apps_c7x_ddr_heaps_hi: c7x-ddr-heaps-hi@880000000 {
+		compatible = "shared-dma-pool";
+		reg = <0x08 0x80000000 0x00 0x20000000>;
+		no-map;
+	};
+
+	vision_apps_shared_memories: vision_apps_shared-memories {
+		compatible = "dma-heap-carveout";
+		reg = <0x08 0xa0000000 0x00 0x20000000>;
+	};
+};
+
+&mcu_r5fss0_core0 {
+	memory-region = <&vision_apps_mcu_r5f_dma_memory>,
+			<&vision_apps_mcu_r5f_memory>;
+};
+
+&main_r5fss0_core0 {
+	memory-region = <&vision_apps_main_r5f_dma_memory>,
+			<&vision_apps_main_r5f_memory>;
+};
+
+&c7x_0 {
+	memory-region = <&vision_apps_c71_0_dma_memory>,
+			<&vision_apps_c71_0_memory>;
+};
+
+&c7x_1 {
+	memory-region = <&vision_apps_c71_1_dma_memory>,
+			<&vision_apps_c71_1_memory>;
+};

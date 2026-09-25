@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Enables TI's dma-buf-phys helper (drivers/misc/dma-buf-phys.c) — the
+ * userspace dmabuf→physical-address translator that vision_apps/TIOVX
+ * (appMemDmaHeapGetPhys) requires for VPAC ISP buffer sharing. */
+/dts-v1/;
+/plugin/;
+
+&{/} {
+	dma_buf_phys {
+		compatible = "ti,dma-buf-phys";
+	};
+};

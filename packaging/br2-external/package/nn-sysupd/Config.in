@@ -1,0 +1,21 @@
+config BR2_PACKAGE_NN_SYSUPD
+	bool "nn-sysupd (whole-system A/B OTA agent)"
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBCURL_CURL
+	select BR2_PACKAGE_XZ
+	select BR2_PACKAGE_E2FSPROGS
+	select BR2_PACKAGE_UBOOT_TOOLS
+	select BR2_PACKAGE_UBOOT_TOOLS_FWPRINTENV
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_BINARIES   # blkid, blockdev, findmnt, sfdisk
+	select BR2_PACKAGE_UTIL_LINUX_SCHEDUTILS # ionice
+	help
+	  The agent behind the "ab-v1" whole-system OTA: polls the hub for a
+	  byai_system rootfs, writes it to the idle root slot, arms a U-Boot
+	  trial boot and confirms or rolls it back on health.  Lives in
+	  nn-modules tools/nn-sysupd; the image supplies the layout it needs
+	  (fw_env.config, /boot-fat, /etc/nn-layout, nn-data).
+
+comment "nn-sysupd needs systemd"
+	depends on !BR2_INIT_SYSTEMD

@@ -1,0 +1,30 @@
+# nn-gw -- the Thread gateway hosted on the byai camera (C6 NCP over USB).
+# Started/stopped by nn-gw-agent to match "radio present AND role enabled";
+# not enabled at boot on its own.  gw-supervise picks provision-net vs
+# operate from the persisted state, and Restart=always bridges the exit
+# after a provisioning COMMIT into operate mode.
+[Unit]
+Description=nn gateway (camera-hosted, ESP32-C6 NCP over USB)
+After=network-online.target nn-data-init.service
+Requires=nn-data-init.service
+
+[Service]
+Type=simple
+# The state lives on nn-data so it survives a system OTA (A/B rootfs).
+# STATE_DIR (the supervisor's check) and NN_GW_STATE_DIR (the binary's
+# kvstore) MUST name the same directory.
+Environment=NN_GW_STATE_DIR=/var/lib/nn-gw
+Environment=STATE_DIR=/var/lib/nn-gw
+Environment=HOME=/var/lib/nn-gw
+# The NCP is found by probing (USB-JTAG serial has no RTS/CTS lines).
+Environment=NCP_UART=auto
+Environment=NCP_UART_FLOW=none
+# Operator overrides (a fixed NCP_UART, another baud) persist on nn-data.
+EnvironmentFile=-/var/lib/nn-gw/env
+ExecStart=/usr/sbin/gw-supervise
+Restart=always
+RestartSec=2
+# gw_linux pings the watchdog while its main loop runs; a frozen or hung
+# gateway is restarted.
+WatchdogSec=45
+NotifyAccess=main

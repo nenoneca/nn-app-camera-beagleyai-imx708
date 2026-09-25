@@ -1,0 +1,11 @@
+# generated kernel tarballs (multi-GB); regenerate with
+# board/nn/beagley-ai/mk-kernel-tarball.sh
+dl/
+# TI vendor firmware — copied from the board / bbb.io-cc33xx-1.0.2.10-firmware,
+# not ours to redistribute
+board/*/*/fw/*.bin
+# TI vision-apps RTOS firmware (j722s-*-fw, ~24 MB) staged by build-image.sh
+# from the vendor artifact store.  These carry NO extension, so the rule above
+# does not cover them -- ignore the whole staging directory rather than trust
+# a pattern to keep vendor blobs out of a public remote.
+board/*/*/fw/ti/

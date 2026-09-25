@@ -1,0 +1,23 @@
+# NOTE: `build*/` matches ANY directory starting with "build", not just
+# build/ -- it has silently swallowed packaging/br2-external/ (was
+# buildroot/) and br-patches/ (was buildroot-patches/).  If a directory
+# you added is mysteriously absent from a fresh clone, check this first,
+# and check with `git ls-files`, not `find`.
+build*/
+# build-image.sh's default NN_WORK (multi-GB: Buildroot tree, kernel tarball,
+# output images).  Note `build*/` above does NOT match a leading underscore.
+_build/
+
+# Generated TI derivatives -- tools are in git, their output is not.
+# Both are derived from files under the TEXAS INSTRUMENTS TEXT FILE LICENSE,
+# which allows derivative works only "for use only with TI Devices" and
+# requires the licence to be reproduced with any redistribution.  Building and
+# running them on the AM67A is fine; committing them here would be a
+# redistribution decision.  Regenerate with:
+#   python3 packaging/mk-selftest-rgb.py                 -> board/selftest.rgb
+board/selftest.gray
+#   python3 packaging/mk-imx708-dcc.py <ti-dcc> board/dcc_viss_imx708.bin
+board/selftest.rgb
+board/selftest.gray
+board/dcc_viss_imx708.bin
+packaging/__pycache__/

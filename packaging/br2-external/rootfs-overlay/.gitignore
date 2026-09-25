@@ -1,0 +1,2 @@
+# never commit an operator's key
+root/.ssh/authorized_keys

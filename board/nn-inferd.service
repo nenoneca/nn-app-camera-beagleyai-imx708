@@ -1,0 +1,19 @@
+[Unit]
+Description=nn-inferd — shared inference service (TI C7x, in edgeai container)
+After=lxc@edgeai.service
+Before=nn-camera.service
+
+[Service]
+Type=simple
+# The C7x keeps DSP state across processes: a SIGKILL leaves it dirty and
+# every later TIDL init fails until reboot.  Always stop this politely.
+ExecStartPre=-/usr/bin/lxc-attach -n edgeai -- pkill -INT -f nn_inferd.py
+ExecStartPre=-/bin/sleep 3
+ExecStart=/usr/bin/lxc-attach -n edgeai -- /opt/nn/inferd/run.sh
+KillSignal=SIGINT
+TimeoutStopSec=25
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
